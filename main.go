@@ -152,7 +152,7 @@ func main() {
 
 	// Send the probes on a ticker
 	probeTicker := time.NewTicker(probeDuration)
-	for range probeTicker.C {
+	for ; true; <-probeTicker.C { // Tick once at start
 		for _, target := range targets {
 			log.Debugf("Sending probe to %s", target)
 			requests.Inc()
