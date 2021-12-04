@@ -26,7 +26,7 @@ nfpms:
     vendor: Nate Sales
     maintainer: Nate Sales <nate@natesales.net>
     description: Verfploeter implementation in Go
-    license: GNU GPL-3.0
+    license: MIT
     section: utils
     priority: extra
     builds:
