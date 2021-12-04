@@ -1,8 +1,10 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -12,11 +14,17 @@ import (
 )
 
 var (
-	source4 = "0.0.0.0"
-	source6 = "::"
+	targets       = flag.String("targets", "1.1.1.1", "Comma separated list of target IP addresses")
+	source4       = flag.String("source4", "0.0.0.0", "IPv4 source address")
+	source6       = flag.String("source6", "::", "IPv6 source address")
+	id            = flag.Int("icmp-id", 0, "ICMP identifier field")
+	probeInterval = flag.String("probe-interval", "2s", "Time between probe pings")
+	metricsAddr   = flag.String("metrics-addr", ":8080", "Metrics listen host")
+	verbose       = flag.Bool("verbose", false, "Enable verbose log messages")
 
-	pc4 *icmp.PacketConn
-	pc6 *icmp.PacketConn
+	version = "dev" // Set by linker
+	pc4     *icmp.PacketConn
+	pc6     *icmp.PacketConn
 )
 
 // icmpProbe sends an ICMP probe to a given target with an ID
@@ -61,9 +69,9 @@ func readEchoReply(pc *icmp.PacketConn) (*icmp.Echo, net.Addr, error) {
 
 	var proto int
 	if ip := net.ParseIP(pc.LocalAddr().String()); ip.To4() != nil {
-		proto = 1
+		proto = 1 // ICMP
 	} else {
-		proto = 58
+		proto = 58 // ICMPv6
 	}
 
 	icmpMessage, err := icmp.ParseMessage(proto, reply[:n])
@@ -79,18 +87,37 @@ func readEchoReply(pc *icmp.PacketConn) (*icmp.Echo, net.Addr, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("unable to assert message body as *icmp.Echo (this should never happen): %+v", icmpMessage.Body)
 	}
+	replies.Inc()
 	return body, src, nil
 }
 
+func logICMPResponse(echo *icmp.Echo, src net.Addr) {
+	log.Debugf("ICMP echo reply from %s id %d", src, echo.ID)
+}
+
 func main() {
-	var err error
-	pc4, err = icmp.ListenPacket("ip4:icmp", source4)
+	flag.Parse()
+	if *verbose || version == "dev" {
+		log.SetLevel(log.DebugLevel)
+		log.Debugln("Running with -verbose")
+	}
+
+	targets := strings.Split(strings.TrimSpace(*targets), ",")
+	probeDuration, err := time.ParseDuration(*probeInterval)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Infof("Starting go-verfploeter %s source4: %s source6: %s, id %d, interval %s, targets %d", version, *source4, *source6, *id, *probeInterval, len(targets))
+
+	// Open ICMP listeners
+	pc4, err = icmp.ListenPacket("ip4:icmp", *source4)
 	if err != nil {
 		log.Fatalf("unable to listen on IPv4: %s", err)
 	}
 	defer pc4.Close()
 
-	pc6, err = icmp.ListenPacket("ip6:icmp", source6)
+	pc6, err = icmp.ListenPacket("ip6:icmp", *source6)
 	if err != nil {
 		log.Fatalf("unable to listen on IPv6: %s", err)
 	}
@@ -104,7 +131,7 @@ func main() {
 				log.Warn(err)
 				continue
 			}
-			log.Infof("IPv4 echo reply from %s id %d", src, reply.ID)
+			logICMPResponse(reply, src)
 		}
 	}()
 
@@ -116,15 +143,22 @@ func main() {
 				log.Warn(err)
 				continue
 			}
-			log.Infof("IPv6 echo reply from %s id %d", src, reply.ID)
+			logICMPResponse(reply, src)
 		}
 	}()
 
+	// Start metrics listener
+	go metricsListen(*metricsAddr)
+
 	// Send the probes on a ticker
-	probeTicker := time.NewTicker(2 * time.Second)
+	probeTicker := time.NewTicker(probeDuration)
 	for range probeTicker.C {
-		if err := icmpProbe("1.1.1.1", 2021); err != nil {
-			log.Warn(err)
+		for _, target := range targets {
+			log.Debugf("Sending probe to %s", target)
+			requests.Inc()
+			if err := icmpProbe(target, *id); err != nil {
+				log.Warn(err)
+			}
 		}
 	}
 }
