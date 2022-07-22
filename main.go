@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,8 +21,9 @@ import (
 )
 
 var (
-	configFile = flag.String("c", "config.yml", "Config file")
-	verbose    = flag.Bool("v", false, "Enable verbose logging")
+	configFile  = flag.String("c", "config.yml", "Config file")
+	targetsFile = flag.String("t", "targets.txt", "Targets file")
+	verbose     = flag.Bool("v", false, "Enable verbose logging")
 
 	version = "dev" // Set by linker
 	pc4     *icmp.PacketConn
@@ -40,8 +42,7 @@ type Config struct {
 		Source4  string        `yaml:"source4"`
 		Source6  string        `yaml:"source6"`
 	} `yaml:"probe"`
-	Nodes   map[uint8]string `yaml:"nodes"`
-	Targets []string         `yaml:"targets"`
+	Nodes map[uint8]string `yaml:"nodes"`
 }
 
 func findNode(id uint8, nodes map[uint8]string) string {
@@ -135,6 +136,13 @@ func main() {
 		log.Fatalf("unable to parse config file: %s", err)
 	}
 
+	// Load targets
+	targetsBytes, err := os.ReadFile(*targetsFile)
+	if err != nil {
+		log.Fatalf("unable to read targets file: %s", err)
+	}
+	targets := strings.Split(string(targetsBytes), "\n")
+
 	requests = promauto.NewCounter(prometheus.CounterOpts{
 		Name:        "verfploeter_requests",
 		ConstLabels: map[string]string{"src": findNode(config.ID, config.Nodes)},
@@ -149,7 +157,7 @@ func main() {
 	log.Infof("Starting go-verfploeter %s id %d source %s and %s probing %d targets every %s",
 		version, config.ID,
 		config.Probe.Source4, config.Probe.Source6,
-		len(config.Targets), config.Probe.Interval)
+		len(targets), config.Probe.Interval)
 
 	// Open ICMP listeners
 	pc4, err = icmp.ListenPacket("ip4:icmp", config.Probe.Source4)
@@ -198,7 +206,7 @@ func main() {
 	probeTicker := time.NewTicker(config.Probe.Interval)
 	for ; true; <-probeTicker.C { // Tick once at start
 		// Pick random target
-		target := config.Targets[rand.Intn(len(config.Targets))]
+		target := targets[rand.Intn(len(targets))]
 		log.Debugf("Sending probe to %s", target)
 		requests.Inc()
 		if err := icmpProbe(target, int(config.ID)); err != nil {

@@ -8,7 +8,3 @@ probe:
 nodes:
   10: fmt2
   37: pdx1
-
-targets:
-  - 1.1.1.1
-  - 9.9.9.9
