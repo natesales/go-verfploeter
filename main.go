@@ -141,7 +141,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("unable to read targets file: %s", err)
 	}
-	targets := strings.Split(string(targetsBytes), "\n")
+	var targets []string
+	for _, line := range strings.Split(string(targetsBytes), "\n") {
+		if line != "" && !strings.HasPrefix(line, "#") {
+			targets = append(targets, line)
+		}
+	}
 
 	requests = promauto.NewCounter(prometheus.CounterOpts{
 		Name:        "verfploeter_requests",
