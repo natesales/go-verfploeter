@@ -6,6 +6,7 @@ require (
 	github.com/prometheus/client_golang v1.11.0
 	github.com/sirupsen/logrus v1.8.1
 	golang.org/x/net v0.0.0-20211123203042-d83791d6bcd9
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

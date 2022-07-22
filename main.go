@@ -4,30 +4,53 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"strings"
+	"net/http"
+	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+	"gopkg.in/yaml.v3"
 )
 
 var (
-	targets       = flag.String("targets", "1.1.1.1", "Comma separated list of target IP addresses")
-	source4       = flag.String("source4", "0.0.0.0", "IPv4 source address")
-	source6       = flag.String("source6", "::", "IPv6 source address")
-	id            = flag.Int("icmp-id", 0, "ICMP identifier field")
-	probeInterval = flag.String("probe-interval", "2s", "Time between probe pings")
-	metricsAddr   = flag.String("metrics-addr", ":8080", "Metrics listen host")
-	verbose       = flag.Bool("verbose", false, "Enable verbose log messages")
+	configFile = flag.String("c", "config.yml", "Config file")
+	verbose    = flag.Bool("v", false, "Enable verbose logging")
 
 	version = "dev" // Set by linker
 	pc4     *icmp.PacketConn
 	pc6     *icmp.PacketConn
+
+	// Metrics
+	requests prometheus.Counter
+	replies  *prometheus.CounterVec
 )
 
-// icmpProbe sends an ICMP probe to a given target with an ID
+type Config struct {
+	ID     uint8  `yaml:"id"`
+	Listen string `yaml:"listen"`
+	Probe  struct {
+		Interval time.Duration `yaml:"interval"`
+		Source4  string        `yaml:"source4"`
+		Source6  string        `yaml:"source6"`
+	} `yaml:"probe"`
+	Nodes   map[uint8]string `yaml:"nodes"`
+	Targets []string         `yaml:"targets"`
+}
+
+func findNode(id uint8, nodes map[uint8]string) string {
+	if node, ok := nodes[id]; ok {
+		return node
+	}
+	return fmt.Sprintf("unknown (id %d)", id)
+}
+
+// icmpProbe sends an ICMP packet to a given target with an ID
 func icmpProbe(target string, id int) error {
 	targetIP, err := net.ResolveIPAddr("ip", target)
 	if err != nil {
@@ -60,7 +83,7 @@ func icmpProbe(target string, id int) error {
 }
 
 // readEchoReply reads and parses an ICMP message from an icmp.PacketConn
-func readEchoReply(pc *icmp.PacketConn) (*icmp.Echo, net.Addr, error) {
+func readEchoReply(pc *icmp.PacketConn, nodes map[uint8]string) (*icmp.Echo, net.Addr, error) {
 	reply := make([]byte, 1500)
 	n, src, err := pc.ReadFrom(reply)
 	if err != nil {
@@ -87,7 +110,7 @@ func readEchoReply(pc *icmp.PacketConn) (*icmp.Echo, net.Addr, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("unable to assert message body as *icmp.Echo (this should never happen): %+v", icmpMessage.Body)
 	}
-	replies.Inc()
+	replies.With(map[string]string{"dst": findNode(uint8(body.ID), nodes)}).Inc()
 	return body, src, nil
 }
 
@@ -97,27 +120,44 @@ func logICMPResponse(echo *icmp.Echo, src net.Addr) {
 
 func main() {
 	flag.Parse()
-	if *verbose || version == "dev" {
+	if *verbose {
 		log.SetLevel(log.DebugLevel)
-		log.Debugln("Running with -verbose")
 	}
 
-	targets := strings.Split(strings.TrimSpace(*targets), ",")
-	probeDuration, err := time.ParseDuration(*probeInterval)
+	// Load config
+	var config Config
+	configBytes, err := os.ReadFile(*configFile)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("unable to read config file: %s", err)
+	}
+	if err = yaml.Unmarshal(configBytes, &config); err != nil {
+		log.Fatalf("unable to parse config file: %s", err)
 	}
 
-	log.Infof("Starting go-verfploeter %s source4: %s source6: %s, id %d, interval %s, targets %d", version, *source4, *source6, *id, *probeInterval, len(targets))
+	requests = promauto.NewCounter(prometheus.CounterOpts{
+		Name:        "verfploeter_requests",
+		ConstLabels: map[string]string{"src": findNode(config.ID, config.Nodes)},
+	})
+	replies = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "verfploeter_replies",
+			ConstLabels: map[string]string{"src": findNode(config.ID, config.Nodes)},
+		}, []string{"dst"},
+	)
+
+	log.Infof("Starting go-verfploeter %s id %d source %s and %s probing %d targets every %s",
+		version, config.ID,
+		config.Probe.Source4, config.Probe.Source6,
+		len(config.Targets), config.Probe.Interval)
 
 	// Open ICMP listeners
-	pc4, err = icmp.ListenPacket("ip4:icmp", *source4)
+	pc4, err = icmp.ListenPacket("ip4:icmp", config.Probe.Source4)
 	if err != nil {
 		log.Fatalf("unable to listen on IPv4: %s", err)
 	}
 	defer pc4.Close()
 
-	pc6, err = icmp.ListenPacket("ip6:icmp", *source6)
+	pc6, err = icmp.ListenPacket("ip6:icmp", config.Probe.Source6)
 	if err != nil {
 		log.Fatalf("unable to listen on IPv6: %s", err)
 	}
@@ -126,7 +166,7 @@ func main() {
 	// Start IPv4 echo listener
 	go func() {
 		for {
-			reply, src, err := readEchoReply(pc4)
+			reply, src, err := readEchoReply(pc4, config.Nodes)
 			if err != nil {
 				log.Warn(err)
 				continue
@@ -138,7 +178,7 @@ func main() {
 	// Start IPv4 echo listener
 	go func() {
 		for {
-			reply, src, err := readEchoReply(pc6)
+			reply, src, err := readEchoReply(pc6, config.Nodes)
 			if err != nil {
 				log.Warn(err)
 				continue
@@ -148,15 +188,18 @@ func main() {
 	}()
 
 	// Start metrics listener
-	go metricsListen(*metricsAddr)
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Fatal(http.ListenAndServe(config.Listen, nil))
+	}()
 
 	// Send the probes on a ticker
-	probeTicker := time.NewTicker(probeDuration)
+	probeTicker := time.NewTicker(config.Probe.Interval)
 	for ; true; <-probeTicker.C { // Tick once at start
-		for _, target := range targets {
+		for _, target := range config.Targets {
 			log.Debugf("Sending probe to %s", target)
 			requests.Inc()
-			if err := icmpProbe(target, *id); err != nil {
+			if err := icmpProbe(target, int(config.ID)); err != nil {
 				log.Warn(err)
 			}
 		}

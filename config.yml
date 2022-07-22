@@ -1,0 +1,14 @@
+id: 10
+listen: :8080
+probe:
+  interval: 2s
+  source4: 0.0.0.0
+  source6: "::"
+
+nodes:
+  10: fmt2
+  37: pdx1
+
+targets:
+  - 1.1.1.1
+  - 9.9.9.9
