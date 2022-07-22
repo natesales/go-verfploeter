@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -196,12 +197,12 @@ func main() {
 	// Send the probes on a ticker
 	probeTicker := time.NewTicker(config.Probe.Interval)
 	for ; true; <-probeTicker.C { // Tick once at start
-		for _, target := range config.Targets {
-			log.Debugf("Sending probe to %s", target)
-			requests.Inc()
-			if err := icmpProbe(target, int(config.ID)); err != nil {
-				log.Warn(err)
-			}
+		// Pick random target
+		target := config.Targets[rand.Intn(len(config.Targets))]
+		log.Debugf("Sending probe to %s", target)
+		requests.Inc()
+		if err := icmpProbe(target, int(config.ID)); err != nil {
+			log.Warn(err)
 		}
 	}
 }
